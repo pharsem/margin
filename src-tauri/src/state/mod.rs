@@ -124,6 +124,8 @@ impl Core {
             conn.execute_batch(sql)?;
             conn.pragma_update(None, "user_version", i as i64 + 1)?;
         }
+        // Hook events are lost while Margin is not running, so read every transcript again.
+        conn.execute("UPDATE sessions SET transcript_mtime = NULL", [])?;
         let (events, _) = broadcast::channel(64);
         Ok(Arc::new(Self { conn: Mutex::new(conn), events }))
     }

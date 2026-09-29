@@ -13,6 +13,11 @@ const STALE_MS: i64 = 12 * 60 * 60 * 1000;
 const DONE_TOAST_DELAY_MS: i64 = 30 * 1000;
 const LABEL_CHARS: usize = 60;
 const TRANSCRIPT_TAIL_BYTES: u64 = 64 * 1024;
+/// A turn that the transcript shows as ended longer ago than this gets no toast. Margin was
+/// probably not running, and the lane shows the state anyway.
+const LATE_TOAST_MS: i64 = 5 * 60 * 1000;
+/// System entries that Claude Code writes when a turn is over.
+const TURN_END_SUBTYPES: &[&str] = &["stop_hook_summary", "turn_duration", "away_summary", "local_command"];
 
 const NEEDS_INPUT_TYPES: &[&str] = &[
     "permission_prompt",
@@ -209,22 +214,27 @@ impl Core {
         Ok(due)
     }
 
-    /// Detects Esc interrupts (no Stop event fires) and removes sessions whose terminal went away.
+    /// Corrects the state from the transcript when a hook event was lost (Margin was not
+    /// running) or never fires (Esc does not fire Stop). Also removes sessions whose terminal
+    /// went away.
     pub fn check_transcripts(&self, now: DateTime<Local>) -> Result<()> {
         let now = now.timestamp_millis();
-        type Row = (String, String, Option<String>, Option<i64>, i64, Option<String>);
+        type Row = (String, String, Option<String>, Option<i64>, i64, Option<String>, Option<i64>);
         let rows: Vec<Row> = {
             let conn = self.conn();
-            let mut stmt =
-                conn.prepare("SELECT id, status, transcript_path, transcript_mtime, updated_at, title FROM sessions")?;
+            let mut stmt = conn.prepare(
+                "SELECT id, status, transcript_path, transcript_mtime, updated_at, title, waiting_since FROM sessions",
+            )?;
             let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
 
         let mut changed = false;
-        for (id, status, path, seen_mtime, updated_at, title) in rows {
+        for (id, status, path, seen_mtime, updated_at, title, waiting_since) in rows {
             let mtime = path.as_deref().and_then(file_mtime_ms);
             let last_activity = mtime.unwrap_or(0).max(updated_at);
             if now - last_activity > STALE_MS {
@@ -246,12 +256,24 @@ impl Core {
                  WHERE id = ?1",
                 params![id, mtime, tail.title, tail.entrypoint],
             )?;
-            if Status::parse(&status) == Status::Running && tail.interrupted {
-                self.conn().execute(
-                    "UPDATE sessions SET status = 'done', waiting_since = ?2, notified_at = NULL WHERE id = ?1",
-                    params![id, now],
-                )?;
-                changed = true;
+            match (Status::parse(&status), tail.last) {
+                (Status::Running, Last::TurnEnded(at)) => {
+                    let at = at.unwrap_or(now).min(now);
+                    let notified = (now - at > LATE_TOAST_MS).then_some(now);
+                    self.conn().execute(
+                        "UPDATE sessions SET status = 'done', waiting_since = ?2, notified_at = ?3 WHERE id = ?1",
+                        params![id, at, notified],
+                    )?;
+                    changed = true;
+                }
+                (Status::Done, Last::Active(Some(at))) if waiting_since.is_some_and(|w| at > w) => {
+                    self.conn().execute(
+                        "UPDATE sessions SET status = 'running', waiting_since = NULL, notified_at = NULL WHERE id = ?1",
+                        [&id],
+                    )?;
+                    changed = true;
+                }
+                _ => {}
             }
         }
         if changed {
@@ -303,10 +325,19 @@ fn file_mtime_ms(path: &str) -> Option<i64> {
     i64::try_from(ms).ok()
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Last {
+    #[default]
+    Unknown,
+    /// Claude is working or the user sent a prompt. Holds the entry time.
+    Active(Option<i64>),
+    /// The turn is over: an end-of-turn entry or an Esc interrupt.
+    TurnEnded(Option<i64>),
+}
+
 #[derive(Debug, Default)]
 struct TranscriptTail {
-    /// The last user or assistant entry is Claude Code's interrupt marker.
-    interrupted: bool,
+    last: Last,
     title: Option<String>,
     entrypoint: Option<String>,
 }
@@ -321,17 +352,28 @@ fn read_tail(path: &Path) -> TranscriptTail {
         return result;
     }
     let text = String::from_utf8_lossy(&bytes);
-    let mut last_message_seen = false;
     let mut custom_title = None;
     let mut ai_title = None;
     for line in text.lines().rev() {
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let kind = entry.get("type").and_then(|t| t.as_str());
+        if result.last == Last::Unknown {
+            let at = entry["timestamp"]
+                .as_str()
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.timestamp_millis());
+            let subtype = entry["subtype"].as_str().unwrap_or("");
+            result.last = match kind {
+                Some("user") if is_interrupt_message(&entry) => Last::TurnEnded(at),
+                Some("user") | Some("assistant") => Last::Active(at),
+                Some("system") if subtype == "stop_hook_summary" && entry["preventedContinuation"] == true => {
+                    Last::Active(at)
+                }
+                Some("system") if TURN_END_SUBTYPES.contains(&subtype) => Last::TurnEnded(at),
+                _ => Last::Unknown,
+            };
+        }
         match kind {
-            Some("user") | Some("assistant") if !last_message_seen => {
-                last_message_seen = true;
-                result.interrupted = kind == Some("user") && is_interrupt_message(&entry);
-            }
             // A title set with /rename wins over the generated one.
             Some("custom-title") if custom_title.is_none() => {
                 custom_title = entry["customTitle"].as_str().map(str::to_string);
@@ -457,7 +499,7 @@ mod tests {
         )
         .unwrap();
         let tail = read_tail(&path);
-        assert!(tail.interrupted);
+        assert!(matches!(tail.last, Last::TurnEnded(_)));
         assert_eq!(tail.title.as_deref(), Some("Fix the login"));
         assert_eq!(tail.entrypoint.as_deref(), Some("cli"));
 
@@ -467,6 +509,43 @@ mod tests {
         core.hook(&prompt, Local::now()).unwrap();
         core.check_transcripts(Local::now()).unwrap();
         assert_eq!(status(&core), Some(Status::Done));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lost_stop_event_is_recovered_from_the_transcript() {
+        let dir = std::env::temp_dir().join(format!("margin-lost-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let ended = Local::now() - Duration::minutes(40);
+        let assistant = r#"{"type":"assistant","timestamp":"2026-09-29T08:29:45.000Z","message":{"content":[]}}"#;
+        let summary = format!(
+            r#"{{"type":"system","subtype":"stop_hook_summary","preventedContinuation":false,"timestamp":"{}"}}"#,
+            ended.to_rfc3339()
+        );
+        std::fs::write(&path, format!("{assistant}\n{summary}\n")).unwrap();
+
+        let core = Core::open_in_memory().unwrap();
+        let mut prompt = event("UserPromptSubmit");
+        prompt.transcript_path = Some(path.to_string_lossy().into());
+        core.hook(&prompt, ended - Duration::minutes(1)).unwrap();
+        core.check_transcripts(Local::now()).unwrap();
+        let s = &core.sessions().unwrap()[0];
+        assert_eq!(s.status, Status::Done);
+        assert_eq!(s.waiting_since, Some(ended.timestamp_millis()));
+        assert!(core.tick_sessions(Local::now()).unwrap().is_empty(), "no toast for an old turn end");
+
+        // New activity after the turn end, with the prompt hook lost as well.
+        let later = Local::now() + Duration::seconds(5);
+        std::fs::write(
+            &path,
+            format!(r#"{{"type":"user","timestamp":"{}","message":{{"content":"next"}}}}"#, later.to_rfc3339()) + "\n",
+        )
+        .unwrap();
+        let bumped = std::fs::File::options().append(true).open(&path).unwrap();
+        bumped.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2)).unwrap();
+        core.check_transcripts(Local::now()).unwrap();
+        assert_eq!(status(&core), Some(Status::Running));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
