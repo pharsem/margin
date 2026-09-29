@@ -40,6 +40,16 @@ pub fn work_area_for(hwnd: isize) -> Option<RECT> {
     }
 }
 
+/// Opens a web URL in the default browser. Other schemes are ignored.
+pub fn open_url(url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
+    }
+}
+
 /// Opens a file with its default app, or with Notepad if no app is associated.
 pub fn open_file(path: &Path) {
     let result = unsafe {

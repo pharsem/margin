@@ -56,7 +56,14 @@ Done when: a maximized window on the target monitor stops at the panel's edge, t
 - Tray icon with show/hide, collapse, settings, quit.
 - Done items are kept 7 days (for "what did I finish today") then purged.
 
+**Data**
+- Items have optional `url` and `source_app` fields from the start (used by step 1b). Items with a URL show a link icon that opens it in the default browser.
+
 Done when: I can capture "check deploy 30m" from any app without touching the mouse, forget about it, and get pulled back at the right time.
+
+### Step 1b — Context suggestions in capture
+
+See CONTEXT-CAPTURE.md. The capture popup suggests notes from the window I was in (e.g. the PR open in my browser), selectable with ↓.
 
 ### Step 2 — Claude Code sessions lane (outline, spec in detail later)
 

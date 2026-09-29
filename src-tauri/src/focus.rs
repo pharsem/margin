@@ -90,7 +90,7 @@ fn bring_to_front(hwnd: HWND) {
     }
 }
 
-fn top_level_windows(filter: impl Fn(HWND) -> bool) -> Vec<HWND> {
+pub(crate) fn top_level_windows(filter: impl Fn(HWND) -> bool) -> Vec<HWND> {
     unsafe extern "system" fn callback(hwnd: HWND, data: LPARAM) -> BOOL {
         let list = unsafe { &mut *(data.0 as *mut Vec<HWND>) };
         if unsafe { IsWindowVisible(hwnd) }.as_bool() && unsafe { GetWindowTextLengthW(hwnd) } > 0 {
@@ -111,7 +111,7 @@ fn class_name(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..len.max(0) as usize])
 }
 
-fn process_name(hwnd: HWND) -> String {
+pub(crate) fn process_name(hwnd: HWND) -> String {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }) else {

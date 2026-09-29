@@ -7,6 +7,14 @@ export type Item = {
   due_at: number | null;
   notified_at: number | null;
   done_at: number | null;
+  url: string | null;
+  source_app: string | null;
+};
+
+export type Suggestion = {
+  text: string;
+  url: string | null;
+  source: "page" | "window" | "clipboard";
 };
 
 export type SessionStatus = "running" | "needs_input" | "done";
@@ -40,7 +48,7 @@ export type Parsed = { title: string; due_at: number | null };
 export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
   parse: (text: string) => invoke<Parsed>("parse_capture", { text }),
-  submit: (text: string) => invoke<void>("submit_capture", { text }),
+  submit: (text: string, url: string | null) => invoke<void>("submit_capture", { text, url }),
   cancel: () => invoke<void>("cancel_capture"),
   openCapture: () => invoke<void>("open_capture"),
   edit: (id: number) => invoke<void>("edit_item", { id }),
@@ -52,4 +60,5 @@ export const api = {
   releaseFocus: () => invoke<void>("release_focus"),
   review: (id: string) => invoke<void>("review_session", { id }),
   focusSession: (id: string) => invoke<void>("focus_session", { id }),
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
 };

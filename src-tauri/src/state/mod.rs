@@ -1,5 +1,6 @@
 //! Business logic and storage. Knows nothing about Tauri, so the HTTP API can share it.
 
+pub mod context;
 pub mod parse;
 pub mod sessions;
 
@@ -23,6 +24,9 @@ pub struct Item {
     pub due_at: Option<i64>,
     pub notified_at: Option<i64>,
     pub done_at: Option<i64>,
+    pub url: Option<String>,
+    /// Process name of the window the item was captured from.
+    pub source_app: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +100,8 @@ const MIGRATIONS: &[&str] = &[
     );",
     "ALTER TABLE sessions ADD COLUMN title TEXT;
     ALTER TABLE sessions ADD COLUMN entrypoint TEXT;",
+    "ALTER TABLE items ADD COLUMN url TEXT;
+    ALTER TABLE items ADD COLUMN source_app TEXT;",
 ];
 
 impl Core {
@@ -158,7 +164,19 @@ impl Core {
             .ok_or_else(|| Error(format!("item {id} not found")))
     }
 
+    #[cfg(test)]
     pub fn add(&self, text: &str, now: DateTime<Local>) -> Result<Item> {
+        self.add_with_link(text, None, None, now)
+    }
+
+    pub fn add_with_link(
+        &self,
+        text: &str,
+        url: Option<&str>,
+        source_app: Option<&str>,
+        now: DateTime<Local>,
+    ) -> Result<Item> {
+        let url = url.filter(|u| u.starts_with("https://") || u.starts_with("http://"));
         let parsed = parse::parse(text, &now);
         if parsed.title.is_empty() {
             return Err(Error("title is empty".into()));
@@ -166,8 +184,8 @@ impl Core {
         let id = {
             let conn = self.conn();
             conn.execute(
-                "INSERT INTO items (title, created_at, due_at) VALUES (?1, ?2, ?3)",
-                params![parsed.title, now.timestamp_millis(), parsed.due_at],
+                "INSERT INTO items (title, created_at, due_at, url, source_app) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![parsed.title, now.timestamp_millis(), parsed.due_at, url, url.and(source_app)],
             )?;
             conn.last_insert_rowid()
         };
@@ -291,6 +309,8 @@ fn item_from_row(row: &Row) -> rusqlite::Result<Item> {
         due_at: row.get("due_at")?,
         notified_at: row.get("notified_at")?,
         done_at: row.get("done_at")?,
+        url: row.get("url")?,
+        source_app: row.get("source_app")?,
     })
 }
 
@@ -385,6 +405,16 @@ mod tests {
         let moved = core.edit(item.id, "daily standup 15m", later).unwrap();
         assert_eq!(moved.due_at, Some((later + Duration::minutes(15)).timestamp_millis()));
         assert_eq!(moved.notified_at, None);
+    }
+
+    #[test]
+    fn links_are_kept_only_for_web_urls() {
+        let core = Core::open_in_memory().unwrap();
+        let item = core.add_with_link("PR #1 x 30m", Some("https://github.com/a/b/pull/1"), Some("chrome.exe"), now()).unwrap();
+        assert_eq!(item.url.as_deref(), Some("https://github.com/a/b/pull/1"));
+        assert_eq!(item.source_app.as_deref(), Some("chrome.exe"));
+        let item = core.add_with_link("x", Some("file:///c:/secret"), Some("chrome.exe"), now()).unwrap();
+        assert_eq!((item.url, item.source_app), (None, None));
     }
 
     #[test]

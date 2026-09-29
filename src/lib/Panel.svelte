@@ -134,6 +134,11 @@
       case "e":
         if (id !== null) report(api.edit(id));
         break;
+      case "o": {
+        const url = row?.item?.url;
+        if (url) report(api.openUrl(url));
+        break;
+      }
       case "Delete":
         if (id !== null) report(api.remove(id));
         break;
@@ -235,6 +240,19 @@
         <li class:overdue={late} class:selected={`i:${item.id}` === selectedKey}>
           <button class="row" onclick={() => (selectedKey = `i:${item.id}`)} ondblclick={() => report(api.edit(item.id))}>
             <span class="title">{item.title}</span>
+            {#if item.url}
+              <span
+                class="link"
+                role="link"
+                tabindex="-1"
+                title={item.url}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  report(api.openUrl(item.url!));
+                }}
+                onkeydown={() => {}}>{"\uE71B"}</span
+              >
+            {/if}
             {#if item.due_at !== null}
               <span class="due" title={clock(item.due_at)}>{relative(item.due_at, now)}</span>
             {/if}
@@ -257,7 +275,7 @@
     </div>
 
     {#if focused}
-      <p class="keys">↑↓ select · Enter done or open · 1 2 3 snooze · E edit · Del delete · R reviewed · Esc leave</p>
+      <p class="keys">↑↓ select · Enter done or open · 1 2 3 snooze · E edit · O open link · Del delete · R reviewed · Esc leave</p>
     {:else if snap.focus_hotkey}
       <p class="keys">{snap.focus_hotkey} to use the keyboard</p>
     {/if}
@@ -449,6 +467,13 @@
   .title {
     flex: 1;
     overflow-wrap: anywhere;
+  }
+  .link {
+    font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+    font-size: 12px;
+    color: var(--accent);
+    cursor: pointer;
+    align-self: center;
   }
   .due {
     color: var(--muted);

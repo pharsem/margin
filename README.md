@@ -29,6 +29,8 @@ The app reads `%APPDATA%\com.petterharsem.margin\config.json` at startup and cre
   "width": 320,
   "hotkey": "Ctrl+Alt+Space",
   "focus_hotkey": "Ctrl+Alt+N",
+  "port": 47811,
+  "context_denylist": ["1Password.exe", "KeePass*.exe", "Bitwarden.exe"],
   "autostart": true
 }
 ```
@@ -38,6 +40,8 @@ The app reads `%APPDATA%\com.petterharsem.margin\config.json` at startup and cre
 - `width`: logical pixels at 100% scaling. The app multiplies it by the DPI scale of the target monitor.
 - `hotkey`: opens the capture popup.
 - `focus_hotkey`: gives the panel keyboard focus, and expands and shows it if necessary.
+- `port`: localhost port for the Claude Code hooks.
+- `context_denylist`: the capture popup never reads windows of these processes. `*` matches any text.
 - `autostart`: start with Windows. If you leave it out, it is on for installed builds and off for dev builds.
 
 The app stores items in `%APPDATA%\com.petterharsem.margin\margin.db`.
@@ -45,6 +49,16 @@ The app stores items in `%APPDATA%\com.petterharsem.margin\margin.db`.
 ## Capture
 
 Type one line and press Enter. An optional time at the end sets a timer: `30m`, `2h`, `1h30m`, or `14:30` (today, or tomorrow if the time is past). Esc cancels.
+
+The popup suggests up to 3 lines from the window you were in when you pressed the hotkey:
+
+- **Tab:** the page in Chrome or Edge, with its URL. A GitHub pull request shows as `PR #412 backend: Fix credit rollover`.
+- **Window:** the app window, for example `Slack: tech-on-call` or the VS Code workspace name.
+- **Clipboard:** a URL or one short line that you copied in the last 60 seconds.
+
+Press Down to select a suggestion. If the input is empty, the suggestion becomes the text, and you can add a time such as ` 30m`. If you typed something first, your text stays and the item gets the link of the suggestion. Press Up to go back to your own text. Items with a link show a link icon in the panel. Click it, or press O, to open the link.
+
+The popup reads only the window title, the process name, the address bar and the clipboard. It does not store any of this, unless you save an item with a suggestion. It reads nothing from incognito or InPrivate windows, from processes in `context_denylist`, or from clipboard entries that a password manager marks as private.
 
 ## Panel keys
 

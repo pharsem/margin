@@ -1,5 +1,7 @@
 #[cfg(windows)]
 mod appbar;
+#[cfg(windows)]
+mod capture;
 mod config;
 #[cfg(windows)]
 mod focus;
@@ -16,7 +18,7 @@ use serde::Serialize;
 use state::sessions::Status;
 use state::{Core, Error, Event, Item, Parsed, Session};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WindowEvent};
@@ -42,6 +44,24 @@ struct AppState {
     editing: Mutex<Option<i64>>,
     server: Mutex<Option<server::Server>>,
     server_error: Mutex<Option<String>>,
+    #[cfg(windows)]
+    clipboard: capture::ClipboardWatch,
+    /// Counts capture popups, so a late browser URL read for an old popup is dropped.
+    capture_generation: AtomicU64,
+    /// Process name of the window under the capture popup. Kept only while the popup is open.
+    capture_source: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Serialize)]
+struct CaptureOpen {
+    text: String,
+    generation: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct CaptureContext {
+    generation: u64,
+    suggestions: Vec<state::context::Suggestion>,
 }
 
 fn app_state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -105,12 +125,13 @@ fn parse_capture(app: AppHandle, text: String) -> Parsed {
 }
 
 #[tauri::command]
-fn submit_capture(app: AppHandle, text: String) -> Result<(), Error> {
+fn submit_capture(app: AppHandle, text: String, url: Option<String>) -> Result<(), Error> {
     let st = app_state(&app);
     let editing = *lock(&st.editing);
+    let source = lock(&st.capture_source).clone();
     match editing {
         Some(id) => st.core.edit(id, &text, Local::now())?,
-        None => st.core.add(&text, Local::now())?,
+        None => st.core.add_with_link(&text, url.as_deref(), source.as_deref(), Local::now())?,
     };
     hide_capture(&app, true);
     Ok(())
@@ -187,6 +208,12 @@ fn release_focus(app: AppHandle) {
 }
 
 #[tauri::command]
+fn open_url(url: String) {
+    #[cfg(windows)]
+    shell::open_url(&url);
+}
+
+#[tauri::command]
 fn quit(app: AppHandle) {
     app.exit(0);
 }
@@ -222,11 +249,18 @@ fn show_capture(app: &AppHandle, edit: Option<i64>) -> Result<(), Error> {
         None => String::new(),
     };
     *lock(&st.editing) = edit;
+    *lock(&st.capture_source) = None;
+    let generation = st.capture_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let window = app.get_webview_window(CAPTURE).ok_or_else(|| err("capture window missing"))?;
+    #[cfg(windows)]
+    let mut context_target = 0;
 
     #[cfg(windows)]
     {
         let target = remember_foreground(app);
+        if edit.is_none() && shell::foreground_window() == target && !own_hwnds(app).contains(&target) {
+            context_target = target;
+        }
         if let Some(work) = shell::work_area_for(target) {
             // Moving to a monitor with another DPI resizes the window, so centre a second time.
             for _ in 0..2 {
@@ -238,10 +272,54 @@ fn show_capture(app: &AppHandle, edit: Option<i64>) -> Result<(), Error> {
         }
     }
 
-    let _ = app.emit_to(CAPTURE, "capture-open", text);
+    let _ = app.emit_to(CAPTURE, "capture-open", CaptureOpen { text, generation });
+    // Read the context before the popup takes focus.
+    #[cfg(windows)]
+    if context_target != 0 {
+        capture_context(app, context_target, generation);
+    }
     window.show().map_err(err)?;
     window.set_focus().map_err(err)?;
     Ok(())
+}
+
+/// Reads the context of the window under the popup. The URL read runs on its own thread and
+/// is dropped if it takes longer than the budget or the popup is gone by then.
+#[cfg(windows)]
+fn capture_context(app: &AppHandle, target: isize, generation: u64) {
+    use state::context::{is_private, suggestions, Context};
+    const URL_BUDGET: Duration = Duration::from_millis(300);
+
+    let st = app_state(app);
+    let title = capture::window_title(target);
+    let process = focus::process_name(windows::Win32::Foundation::HWND(target as _));
+    let denylist = lock(&st.config).context_denylist.clone();
+    if is_private(&title, &process, &denylist) {
+        return;
+    }
+    *lock(&st.capture_source) = Some(process.clone());
+    let clipboard = st.clipboard.recent_text(Local::now().timestamp_millis());
+    let mut ctx = Context { window_title: title, process, url: None, clipboard };
+    let emit = move |app: &AppHandle, ctx: &Context| {
+        let payload = CaptureContext { generation, suggestions: suggestions(ctx) };
+        let _ = app.emit_to(CAPTURE, "capture-context", payload);
+    };
+    emit(app, &ctx);
+
+    if capture::is_browser(&ctx.process) {
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let url = capture::browser_url(target);
+            let st = app_state(&handle);
+            let current = st.capture_generation.load(Ordering::SeqCst) == generation;
+            let open = handle.get_webview_window(CAPTURE).and_then(|w| w.is_visible().ok()).unwrap_or(false);
+            if url.is_some() && started.elapsed() <= URL_BUDGET && current && open {
+                ctx.url = url;
+                emit(&handle, &ctx);
+            }
+        });
+    }
 }
 
 fn hide_capture(app: &AppHandle, restore_focus: bool) {
@@ -251,6 +329,7 @@ fn hide_capture(app: &AppHandle, restore_focus: bool) {
     }
     let _ = window.hide();
     *lock(&app_state(app).editing) = None;
+    *lock(&app_state(app).capture_source) = None;
     #[cfg(windows)]
     if restore_focus {
         shell::set_foreground_window(app_state(app).previous_foreground.load(Ordering::SeqCst));
@@ -476,6 +555,8 @@ fn start_background(app: &AppHandle) {
         let mut last_purge: Option<SystemTime> = None;
         loop {
             let now = Local::now();
+            #[cfg(windows)]
+            app_state(&handle).clipboard.poll(now.timestamp_millis());
             if let Err(e) = core.tick(now) {
                 eprintln!("[tick] {e}");
             }
@@ -537,6 +618,7 @@ pub fn run() {
             focus_session,
             set_collapsed,
             release_focus,
+            open_url,
             quit,
             #[cfg(windows)]
             appbar_state,
@@ -561,6 +643,10 @@ pub fn run() {
                 editing: Mutex::new(None),
                 server: Mutex::new(None),
                 server_error: Mutex::new(None),
+                #[cfg(windows)]
+                clipboard: capture::ClipboardWatch::default(),
+                capture_generation: AtomicU64::new(0),
+                capture_source: Mutex::new(None),
             });
             start_server(&handle, config.port);
 
