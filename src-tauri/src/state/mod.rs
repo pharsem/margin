@@ -1,6 +1,7 @@
 //! Business logic and storage. Knows nothing about Tauri, so the HTTP API can share it.
 
 pub mod context;
+pub mod inbox;
 pub mod parse;
 pub mod sessions;
 
@@ -42,6 +43,8 @@ pub enum Event {
     Due(Vec<Item>),
     /// Sessions that started to wait for the user. Sent once per wait.
     SessionsWaiting(Vec<Session>),
+    /// Inbox questions that passed the reply threshold. Sent once per entry.
+    InboxOverdue(Vec<inbox::InboxEntry>),
 }
 
 #[derive(Debug)]
@@ -102,6 +105,18 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE sessions ADD COLUMN entrypoint TEXT;",
     "ALTER TABLE items ADD COLUMN url TEXT;
     ALTER TABLE items ADD COLUMN source_app TEXT;",
+    "CREATE TABLE inbox (
+        key TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        url TEXT,
+        since INTEGER,
+        first_seen INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL,
+        dismissed_at INTEGER,
+        notified_at INTEGER
+    );",
 ];
 
 impl Core {

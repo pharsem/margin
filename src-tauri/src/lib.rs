@@ -6,6 +6,8 @@ mod config;
 #[cfg(windows)]
 mod focus;
 mod hooks_install;
+#[cfg(windows)]
+mod inbox_check;
 mod server;
 #[cfg(windows)]
 mod shell;
@@ -16,6 +18,7 @@ use chrono::Local;
 use config::Config;
 use serde::Serialize;
 use state::sessions::Status;
+use state::inbox::InboxEntry;
 use state::{Core, Error, Event, Item, Parsed, Session};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
@@ -29,6 +32,9 @@ use tauri_plugin_notification::NotificationExt;
 const PANEL: &str = "main";
 const CAPTURE: &str = "capture";
 const COLLAPSED_KEY: &str = "collapsed";
+const INBOX_LAST_RUN_KEY: &str = "inbox_last_run";
+/// Skip the inbox check when nobody used the PC for this long.
+const AWAY_MS: u32 = 30 * 60 * 1000;
 const PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 struct AppState {
@@ -41,7 +47,8 @@ struct AppState {
     collapsed: AtomicBool,
     /// The window that had focus before a hotkey took it, so focus can go back.
     previous_foreground: AtomicIsize,
-    editing: Mutex<Option<i64>>,
+    editing: Mutex<CaptureTarget>,
+    inbox_status: Mutex<InboxStatus>,
     server: Mutex<Option<server::Server>>,
     server_error: Mutex<Option<String>>,
     #[cfg(windows)]
@@ -50,6 +57,23 @@ struct AppState {
     capture_generation: AtomicU64,
     /// Process name of the window under the capture popup. Kept only while the popup is open.
     capture_source: Mutex<Option<String>>,
+}
+
+/// What the capture popup saves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaptureTarget {
+    New,
+    Edit(i64),
+    /// A follow-up made from an inbox entry.
+    Inbox(String),
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct InboxStatus {
+    enabled: bool,
+    running: bool,
+    last_run: Option<i64>,
+    errors: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -79,6 +103,8 @@ fn err(e: impl std::fmt::Display) -> Error {
 #[derive(Clone, Serialize)]
 struct Snapshot {
     sessions: Vec<Session>,
+    inbox: Vec<InboxEntry>,
+    inbox_status: InboxStatus,
     open: Vec<Item>,
     done_today: Vec<Item>,
     collapsed: bool,
@@ -94,8 +120,12 @@ fn snapshot(app: &AppHandle) -> Result<Snapshot, Error> {
     errors.extend(lock(&st.hotkey_errors).iter().cloned());
     errors.extend(lock(&st.server_error).iter().cloned());
     let config = lock(&st.config).clone();
+    let mut inbox_status = lock(&st.inbox_status).clone();
+    inbox_status.enabled = config.inbox.enabled;
     Ok(Snapshot {
         sessions: st.core.sessions()?,
+        inbox: st.core.inbox()?,
+        inbox_status,
         open: items.open,
         done_today: items.done_today,
         collapsed: st.collapsed.load(Ordering::SeqCst),
@@ -127,11 +157,12 @@ fn parse_capture(app: AppHandle, text: String) -> Parsed {
 #[tauri::command]
 fn submit_capture(app: AppHandle, text: String, url: Option<String>) -> Result<(), Error> {
     let st = app_state(&app);
-    let editing = *lock(&st.editing);
+    let target = lock(&st.editing).clone();
     let source = lock(&st.capture_source).clone();
-    match editing {
-        Some(id) => st.core.edit(id, &text, Local::now())?,
-        None => st.core.add_with_link(&text, url.as_deref(), source.as_deref(), Local::now())?,
+    match target {
+        CaptureTarget::Edit(id) => st.core.edit(id, &text, Local::now())?,
+        CaptureTarget::Inbox(key) => st.core.inbox_to_follow_up(&key, &text, Local::now())?,
+        CaptureTarget::New => st.core.add_with_link(&text, url.as_deref(), source.as_deref(), Local::now())?,
     };
     hide_capture(&app, true);
     Ok(())
@@ -144,12 +175,65 @@ fn cancel_capture(app: AppHandle) {
 
 #[tauri::command]
 fn open_capture(app: AppHandle) -> Result<(), Error> {
-    show_capture(&app, None)
+    show_capture(&app, CaptureTarget::New)
 }
 
 #[tauri::command]
 fn edit_item(app: AppHandle, id: i64) -> Result<(), Error> {
-    show_capture(&app, Some(id))
+    show_capture(&app, CaptureTarget::Edit(id))
+}
+
+#[tauri::command]
+fn inbox_follow_up(app: AppHandle, key: String) -> Result<(), Error> {
+    show_capture(&app, CaptureTarget::Inbox(key))
+}
+
+#[tauri::command]
+fn dismiss_inbox(app: AppHandle, key: String) -> Result<(), Error> {
+    app_state(&app).core.dismiss_inbox(&key, Local::now())
+}
+
+#[tauri::command]
+async fn later_inbox(app: AppHandle, key: String) -> Result<(), Error> {
+    let entry = app_state(&app).core.inbox_entry(&key)?;
+    post_later(&app, &entry.text, entry.url.as_deref()).await?;
+    app_state(&app).core.dismiss_inbox(&key, Local::now())
+}
+
+#[tauri::command]
+async fn later_item(app: AppHandle, id: i64) -> Result<(), Error> {
+    let item = app_state(&app).core.get(id)?;
+    post_later(&app, &item.title, item.url.as_deref()).await?;
+    app_state(&app).core.delete(id)
+}
+
+#[tauri::command]
+fn check_inbox_now(app: AppHandle) {
+    run_inbox_check(&app);
+}
+
+/// Posts to #petter-brain (or wherever the webhook points) for the slow loop.
+async fn post_later(app: &AppHandle, text: &str, url: Option<&str>) -> Result<(), Error> {
+    let webhook = lock(&app_state(app).config).later_webhook.clone().filter(|w| !w.trim().is_empty());
+    let Some(webhook) = webhook else {
+        return Err(err("Set \"later_webhook\" in Settings to use Later."));
+    };
+    let line = match url {
+        Some(url) => format!("{text} {url}"),
+        None => text.to_string(),
+    };
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || inbox_check::post_to_webhook(&webhook, &line))
+            .await
+            .map_err(err)?
+            .map_err(Error)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (webhook, line);
+        Err(err("Later needs Windows"))
+    }
 }
 
 #[tauri::command]
@@ -242,13 +326,15 @@ fn remember_foreground(app: &AppHandle) -> isize {
     app_state(app).previous_foreground.load(Ordering::SeqCst)
 }
 
-fn show_capture(app: &AppHandle, edit: Option<i64>) -> Result<(), Error> {
+fn show_capture(app: &AppHandle, target: CaptureTarget) -> Result<(), Error> {
     let st = app_state(app);
-    let text = match edit {
-        Some(id) => st.core.edit_text(id)?,
-        None => String::new(),
+    let text = match &target {
+        CaptureTarget::Edit(id) => st.core.edit_text(*id)?,
+        CaptureTarget::Inbox(key) => st.core.inbox_entry(key)?.text,
+        CaptureTarget::New => String::new(),
     };
-    *lock(&st.editing) = edit;
+    let is_new = target == CaptureTarget::New;
+    *lock(&st.editing) = target;
     *lock(&st.capture_source) = None;
     let generation = st.capture_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let window = app.get_webview_window(CAPTURE).ok_or_else(|| err("capture window missing"))?;
@@ -258,7 +344,7 @@ fn show_capture(app: &AppHandle, edit: Option<i64>) -> Result<(), Error> {
     #[cfg(windows)]
     {
         let target = remember_foreground(app);
-        if edit.is_none() && shell::foreground_window() == target && !own_hwnds(app).contains(&target) {
+        if is_new && shell::foreground_window() == target && !own_hwnds(app).contains(&target) {
             context_target = target;
         }
         if let Some(work) = shell::work_area_for(target) {
@@ -328,7 +414,7 @@ fn hide_capture(app: &AppHandle, restore_focus: bool) {
         return;
     }
     let _ = window.hide();
-    *lock(&app_state(app).editing) = None;
+    *lock(&app_state(app).editing) = CaptureTarget::New;
     *lock(&app_state(app).capture_source) = None;
     #[cfg(windows)]
     if restore_focus {
@@ -397,9 +483,10 @@ pub(crate) fn open_settings(app: &AppHandle) {
 }
 
 fn on_shortcut(app: &AppHandle, shortcut: &Shortcut) {
-    let config = lock(&app_state(app).config).clone();
+    let Some(st) = app.try_state::<AppState>() else { return };
+    let config = lock(&st.config).clone();
     if config.hotkey.parse::<Shortcut>().ok().as_ref() == Some(shortcut) {
-        if let Err(e) = show_capture(app, None) {
+        if let Err(e) = show_capture(app, CaptureTarget::New) {
             eprintln!("[capture] {e}");
         }
     } else if config.focus_hotkey.parse::<Shortcut>().ok().as_ref() == Some(shortcut) {
@@ -495,6 +582,30 @@ fn notify_sessions(app: &AppHandle, sessions: &[Session]) {
     };
     // A click on the toast opens the first session, the same as a click in the lane.
     let first = sessions[0].id.clone();
+    let handle = app.clone();
+    toast(app, &title, &body, move || open_session(&handle, &first));
+}
+
+fn notify_inbox(app: &AppHandle, entries: &[InboxEntry]) {
+    let (title, body) = match entries {
+        [] => return,
+        [e] => ("A question waits for your reply".to_string(), e.text.clone()),
+        _ => (
+            format!("{} questions wait for your reply", entries.len()),
+            entries.iter().take(5).map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n"),
+        ),
+    };
+    let url = entries[0].url.clone();
+    toast(app, &title, &body, move || {
+        #[cfg(windows)]
+        if let Some(url) = url.as_deref() {
+            shell::open_url(url);
+        }
+    });
+}
+
+/// Shows a toast. The plugin has no click callback on Windows, so this uses WinRT directly.
+fn toast(app: &AppHandle, title: &str, body: &str, on_click: impl Fn() + Send + 'static) {
     #[cfg(windows)]
     {
         use tauri_winrt_notification::Toast;
@@ -502,12 +613,11 @@ fn notify_sessions(app: &AppHandle, sessions: &[Session]) {
         let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let dev = exe_dir.is_some_and(|d| d.ends_with("target\\debug") || d.ends_with("target\\release"));
         let app_id = if dev { Toast::POWERSHELL_APP_ID.to_string() } else { app.config().identifier.clone() };
-        let handle = app.clone();
         let result = Toast::new(&app_id)
-            .title(&title)
-            .text1(&body)
+            .title(title)
+            .text1(body)
             .on_activated(move |_| {
-                open_session(&handle, &first);
+                on_click();
                 Ok(())
             })
             .show();
@@ -517,11 +627,73 @@ fn notify_sessions(app: &AppHandle, sessions: &[Session]) {
     }
     #[cfg(not(windows))]
     {
-        let _ = first;
+        let _ = on_click;
         if let Err(e) = app.notification().builder().title(title).body(body).show() {
             eprintln!("[notify] {e}");
         }
     }
+}
+
+/// Starts an inbox check on a worker thread, unless one runs already.
+pub(crate) fn run_inbox_check(app: &AppHandle) {
+    let st = app_state(app);
+    {
+        let mut status = lock(&st.inbox_status);
+        if status.running {
+            return;
+        }
+        status.running = true;
+    }
+    emit_snapshot(app);
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let st = app_state(&handle);
+        let config = lock(&st.config).inbox.clone();
+        let now = Local::now();
+        let mut errors = Vec::new();
+        #[cfg(windows)]
+        for (source, result) in inbox_check::run(&config, now).sources {
+            match result {
+                Ok(found) => {
+                    if let Err(e) = st.core.sync_inbox(source, &found, now) {
+                        errors.push(format!("{}: {e}", source.as_str()));
+                    }
+                }
+                Err(e) => errors.push(format!("{}: {e}", source.as_str())),
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = config;
+        for e in &errors {
+            eprintln!("[inbox] {e}");
+        }
+        let _ = st.core.set_meta(INBOX_LAST_RUN_KEY, &now.timestamp_millis().to_string());
+        {
+            let mut status = lock(&st.inbox_status);
+            status.running = false;
+            status.last_run = Some(now.timestamp_millis());
+            status.errors = errors;
+        }
+        emit_snapshot(&handle);
+    });
+}
+
+/// Starts a scheduled inbox check when it is due: in work hours, with the user at the PC.
+fn maybe_run_inbox_check(app: &AppHandle, now: chrono::DateTime<Local>) {
+    let st = app_state(app);
+    let config = lock(&st.config).inbox.clone();
+    if !config.enabled || !config.in_work_hours(now) {
+        return;
+    }
+    let last = lock(&st.inbox_status).last_run.unwrap_or(0);
+    if now.timestamp_millis() - last < i64::from(config.interval_minutes) * 60_000 {
+        return;
+    }
+    #[cfg(windows)]
+    if shell::user_is_away(AWAY_MS) {
+        return;
+    }
+    run_inbox_check(app);
 }
 
 /// Brings the window of a session to the front, and shows the error in the panel if it fails.
@@ -580,6 +752,7 @@ fn start_background(app: &AppHandle) {
             Ok(Event::Changed) => emit_snapshot(&handle),
             Ok(Event::Due(items)) => notify_due(&handle, &items),
             Ok(Event::SessionsWaiting(sessions)) => notify_sessions(&handle, &sessions),
+            Ok(Event::InboxOverdue(entries)) => notify_inbox(&handle, &entries),
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => emit_snapshot(&handle),
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
@@ -592,8 +765,17 @@ fn start_background(app: &AppHandle) {
         let modified = |p: &PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let mut config_mtime = modified(&config_path);
         let mut last_purge: Option<SystemTime> = None;
+        let mut ticks: u64 = 0;
         loop {
             let now = Local::now();
+            ticks += 1;
+            if ticks % 60 == 1 {
+                maybe_run_inbox_check(&handle, now);
+            }
+            let toast_ms = (lock(&app_state(&handle).config).inbox.question_toast_hours * 3_600_000.0) as i64;
+            if let Err(e) = core.tick_inbox(now, toast_ms) {
+                eprintln!("[inbox] {e}");
+            }
             #[cfg(windows)]
             app_state(&handle).clipboard.poll(now.timestamp_millis());
             if let Err(e) = core.tick(now) {
@@ -653,6 +835,11 @@ pub fn run() {
             reopen_item,
             snooze_item,
             delete_item,
+            inbox_follow_up,
+            dismiss_inbox,
+            later_inbox,
+            later_item,
+            check_inbox_now,
             review_session,
             focus_session,
             set_collapsed,
@@ -669,6 +856,8 @@ pub fn run() {
             eprintln!("[config] {} {config:?}", config_path.display());
             let core = Core::open(&app.path().app_data_dir()?.join("margin.db"))?;
             let collapsed = core.meta(COLLAPSED_KEY)?.as_deref() == Some("true");
+            // Kept across restarts, so a dev rebuild does not start a new check each time.
+            let core_last_run = core.meta(INBOX_LAST_RUN_KEY)?.and_then(|v| v.parse().ok());
 
             app.manage(AppState {
                 core,
@@ -679,7 +868,11 @@ pub fn run() {
                 visible: AtomicBool::new(true),
                 collapsed: AtomicBool::new(collapsed),
                 previous_foreground: AtomicIsize::new(0),
-                editing: Mutex::new(None),
+                editing: Mutex::new(CaptureTarget::New),
+                inbox_status: Mutex::new(InboxStatus {
+                    last_run: core_last_run,
+                    ..Default::default()
+                }),
                 server: Mutex::new(None),
                 server_error: Mutex::new(None),
                 #[cfg(windows)]
@@ -689,6 +882,11 @@ pub fn run() {
             });
             start_server(&handle, config.port);
 
+            // The windows have "create": false. A page that loads before manage() could call a
+            // command that reads AppState, and that panic would abort the process.
+            for window in app.config().app.windows.clone() {
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &window)?.build()?;
+            }
             let panel = app.get_webview_window(PANEL).expect("panel window");
             #[cfg(windows)]
             {
@@ -704,6 +902,8 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
+            // A second instance quits before setup, but its windows still send events.
+            _ if window.app_handle().try_state::<AppState>().is_none() => {}
             (CAPTURE, WindowEvent::Focused(false)) => hide_capture(window.app_handle(), false),
             (CAPTURE, WindowEvent::CloseRequested { api, .. }) => {
                 api.prevent_close();

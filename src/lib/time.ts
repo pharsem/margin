@@ -7,6 +7,14 @@ export function span(minutes: number): string {
   return m ? `${h} h ${m} min` : `${h} h`;
 }
 
+/** A short age for lists: "12 min", "3 h", "6 d". */
+export function age(ms: number): string {
+  const minutes = Math.max(0, Math.floor(ms / MINUTE));
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} h`;
+  return `${Math.floor(minutes / (24 * 60))} d`;
+}
+
 export function relative(due: number, now: number): string {
   const diff = due - now;
   if (diff <= 0) {

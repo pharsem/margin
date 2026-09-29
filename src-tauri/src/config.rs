@@ -29,9 +29,59 @@ pub struct Config {
     pub port: u16,
     /// Processes whose windows the capture popup never reads. `*` matches any text.
     pub context_denylist: Vec<String>,
+    pub inbox: InboxConfig,
+    /// Slack incoming webhook for the "Later" action. Keep it out of version control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub later_webhook: Option<String>,
     /// Unset means on for installed builds and off for dev builds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autostart: Option<bool>,
+}
+
+/// The periodic check of GitHub, Slack and ClickUp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InboxConfig {
+    pub enabled: bool,
+    /// Local time, "HH:MM". The check runs from `start` until `end`.
+    pub start: String,
+    pub end: String,
+    /// 1 is Monday, 7 is Sunday.
+    pub days: Vec<u8>,
+    pub interval_minutes: u32,
+    pub model: String,
+    /// A Slack question with no reply for this long gives a toast.
+    pub question_toast_hours: f64,
+    /// Path to claude.exe. If unset, Margin searches PATH.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_path: Option<String>,
+}
+
+impl Default for InboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            start: "07:00".into(),
+            end: "17:00".into(),
+            days: vec![1, 2, 3, 4, 5],
+            interval_minutes: 30,
+            model: "sonnet".into(),
+            question_toast_hours: 2.0,
+            claude_path: None,
+        }
+    }
+}
+
+impl InboxConfig {
+    pub fn in_work_hours(&self, now: chrono::DateTime<chrono::Local>) -> bool {
+        use chrono::{Datelike, NaiveTime};
+        let day = now.weekday().number_from_monday() as u8;
+        let parse = |s: &str| NaiveTime::parse_from_str(s, "%H:%M").ok();
+        match (parse(&self.start), parse(&self.end)) {
+            (Some(start), Some(end)) => self.days.contains(&day) && now.time() >= start && now.time() < end,
+            _ => false,
+        }
+    }
 }
 
 impl Default for Config {
@@ -44,6 +94,8 @@ impl Default for Config {
             focus_hotkey: "Ctrl+Alt+N".into(),
             port: 47811,
             context_denylist: ["1Password.exe", "KeePass*.exe", "Bitwarden.exe"].map(String::from).to_vec(),
+            inbox: InboxConfig::default(),
+            later_webhook: None,
             autostart: None,
         }
     }

@@ -33,8 +33,27 @@ export type Session = {
   message: string | null;
 };
 
+export type InboxEntry = {
+  key: string;
+  source: "github" | "slack" | "clickup";
+  kind: "review" | "question" | "task";
+  text: string;
+  url: string | null;
+  since: number | null;
+  first_seen: number;
+};
+
+export type InboxStatus = {
+  enabled: boolean;
+  running: boolean;
+  last_run: number | null;
+  errors: string[];
+};
+
 export type Snapshot = {
   sessions: Session[];
+  inbox: InboxEntry[];
+  inbox_status: InboxStatus;
   open: Item[];
   done_today: Item[];
   collapsed: boolean;
@@ -61,4 +80,9 @@ export const api = {
   review: (id: string) => invoke<void>("review_session", { id }),
   focusSession: (id: string) => invoke<void>("focus_session", { id }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
+  inboxFollowUp: (key: string) => invoke<void>("inbox_follow_up", { key }),
+  dismissInbox: (key: string) => invoke<void>("dismiss_inbox", { key }),
+  laterInbox: (key: string) => invoke<void>("later_inbox", { key }),
+  laterItem: (id: number) => invoke<void>("later_item", { id }),
+  checkInbox: () => invoke<void>("check_inbox_now"),
 };

@@ -3,15 +3,19 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick } from "svelte";
-  import { api, type Item, type Session, type Snapshot } from "./api";
-  import { clock, relative, span } from "./time";
+  import { api, type InboxEntry, type Item, type Session, type Snapshot } from "./api";
+  import { age, clock, relative, span } from "./time";
 
-  type Row = { key: string; session?: Session; item?: Item };
+  type Row = { key: string; session?: Session; item?: Item; entry?: InboxEntry };
+
+  const SOURCE_LABEL = { github: "GitHub", slack: "Slack", clickup: "ClickUp" } as const;
 
   const SNOOZE = [10, 30, 120];
 
   let snap = $state<Snapshot>({
     sessions: [],
+    inbox: [],
+    inbox_status: { enabled: false, running: false, last_run: null, errors: [] },
     open: [],
     done_today: [],
     collapsed: false,
@@ -50,6 +54,7 @@
     return [
       ...s.sessions.map((session) => ({ key: `s:${session.id}`, session })),
       ...s.open.map((item) => ({ key: `i:${item.id}`, item })),
+      ...s.inbox.map((entry) => ({ key: `n:${entry.key}`, entry })),
     ];
   }
 
@@ -111,6 +116,22 @@
       e.preventDefault();
       return;
     }
+    if (row?.entry) {
+      const entry = row.entry;
+      const actions: Record<string, () => Promise<unknown>> = {
+        Enter: () => (entry.url ? api.openUrl(entry.url) : Promise.resolve()),
+        o: () => (entry.url ? api.openUrl(entry.url) : Promise.resolve()),
+        f: () => api.inboxFollowUp(entry.key),
+        l: () => api.laterInbox(entry.key),
+        d: () => api.dismissInbox(entry.key),
+        Delete: () => api.dismissInbox(entry.key),
+      };
+      if (actions[e.key]) {
+        actions[e.key]().catch((err) => showNotice(String(err)));
+        e.preventDefault();
+        return;
+      }
+    }
     const id = row?.item?.id ?? null;
     switch (e.key) {
       case "ArrowDown":
@@ -139,6 +160,9 @@
         if (url) report(api.openUrl(url));
         break;
       }
+      case "l":
+        if (id !== null) api.laterItem(id).catch((err) => showNotice(String(err)));
+        break;
       case "Delete":
         if (id !== null) report(api.remove(id));
         break;
@@ -266,6 +290,7 @@
               </button>
             {/each}
             <button class="icon" title="Edit (E)" onclick={() => report(api.edit(item.id))}>{""}</button>
+            <button class="snooze" title="Post to Slack for later (L)" onclick={() => api.laterItem(item.id).catch((e) => showNotice(String(e)))}>Later</button>
             <button class="icon" title="Delete (Del)" onclick={() => report(api.remove(item.id))}>{""}</button>
           </div>
         </li>
@@ -273,10 +298,54 @@
         <li class="empty">Nothing waiting. {snap.hotkey} to add.</li>
       {/each}
       </ul>
+      {#if snap.inbox_status.enabled}
+        <h2 class="inbox-head">
+          <span>Inbox</span>
+          <button
+            class="inbox-status"
+            title={snap.inbox_status.errors.join("\n") || "Check now"}
+            onclick={() => report(api.checkInbox())}
+          >
+            {#if snap.inbox_status.running}
+              checking…
+            {:else if snap.inbox_status.last_run}
+              {snap.inbox_status.errors.length ? "partly failed" : "checked"} {clock(snap.inbox_status.last_run)}
+            {:else}
+              not checked yet
+            {/if}
+          </button>
+        </h2>
+        <ul>
+          {#each snap.inbox as entry (entry.key)}
+            <li class="inbox {entry.kind}" class:selected={`n:${entry.key}` === selectedKey}>
+              <button
+                class="row"
+                onclick={() => (selectedKey = `n:${entry.key}`)}
+                ondblclick={() => entry.url && report(api.openUrl(entry.url))}
+                title={entry.text}
+              >
+                <span class="source">{SOURCE_LABEL[entry.source]}</span>
+                <span class="title">{entry.text}</span>
+                <span class="due">{age(now - (entry.since ?? entry.first_seen))}</span>
+              </button>
+              <div class="actions">
+                {#if entry.url}
+                  <button class="icon" title="Open (O)" onclick={() => report(api.openUrl(entry.url!))}>{"\uE8A7"}</button>
+                {/if}
+                <button class="icon" title="Make a follow-up (F)" onclick={() => report(api.inboxFollowUp(entry.key))}>{"\uE710"}</button>
+                <button class="snooze" title="Post to Slack for later (L)" onclick={() => api.laterInbox(entry.key).catch((e) => showNotice(String(e)))}>Later</button>
+                <button class="icon" title="Dismiss (D)" onclick={() => report(api.dismissInbox(entry.key))}>{"\uE711"}</button>
+              </div>
+            </li>
+          {:else}
+            <li class="empty">Nothing needs a reply.</li>
+          {/each}
+        </ul>
+      {/if}
     </div>
 
     {#if focused}
-      <p class="keys">↑↓ select · Enter done or open · 1 2 3 snooze · E edit · O open link · Del delete · R reviewed · Esc leave</p>
+      <p class="keys">↑↓ select · Enter done or open · 1 2 3 snooze · E edit · O open · F follow-up · L later · Del delete · R reviewed · Esc leave</p>
     {:else if snap.focus_hotkey}
       <p class="keys">{snap.focus_hotkey} to use the keyboard</p>
     {/if}
@@ -387,6 +456,33 @@
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--muted);
+  }
+  .inbox-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .inbox-status {
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    color: var(--muted);
+  }
+  .inbox .source {
+    flex: none;
+    font-size: 11px;
+    color: var(--muted);
+    width: 44px;
+  }
+  .inbox .title {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .inbox.question .due {
+    color: var(--warn);
   }
   .session .title {
     display: flex;

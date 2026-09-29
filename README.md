@@ -31,6 +31,8 @@ The app reads `%APPDATA%\com.petterharsem.margin\config.json` at startup and cre
   "focus_hotkey": "Ctrl+Alt+N",
   "port": 47811,
   "context_denylist": ["1Password.exe", "KeePass*.exe", "Bitwarden.exe"],
+  "inbox": { "enabled": true, "start": "07:00", "end": "17:00", "days": [1, 2, 3, 4, 5], "interval_minutes": 30, "model": "sonnet", "question_toast_hours": 2 },
+  "later_webhook": "https://hooks.slack.com/services/…",
   "autostart": true
 }
 ```
@@ -42,6 +44,8 @@ The app reads `%APPDATA%\com.petterharsem.margin\config.json` at startup and cre
 - `focus_hotkey`: gives the panel keyboard focus, and expands and shows it if necessary.
 - `port`: localhost port for the Claude Code hooks.
 - `context_denylist`: the capture popup never reads windows of these processes. `*` matches any text.
+- `inbox`: when and how the Inbox check runs. `days` uses 1 for Monday and 7 for Sunday. Set `claude_path` if Margin cannot find `claude.exe`.
+- `later_webhook`: a Slack incoming webhook for the **Later** action. Do not commit this URL anywhere.
 - `autostart`: start with Windows. If you leave it out, it is on for installed builds and off for dev builds.
 
 The app stores items in `%APPDATA%\com.petterharsem.margin\margin.db`.
@@ -86,6 +90,24 @@ Click a session, or select it and press Enter, to go to its window. Margin finds
 A session leaves the lane when it ends, when you mark it reviewed (R), or when its transcript does not change for 12 hours. The time under the state shows how long the session waited for you. It turns amber after 5 minutes and red after 15 minutes. A permission prompt gives a toast at once. A finished reply gives a toast after 30 seconds with no new prompt.
 
 The hooks run `curl` in the background (`"async": true`), so Claude does not wait for them. If Margin is not running, they fail with no message. Set the environment variable `MARGIN_IGNORE=1` for sessions that you do not want in the lane, for example `claude -p` scripts. The hooks post to `127.0.0.1` on the port in `config.json` (`"port"`, default 47811). If you change the port, install the hooks again.
+
+## Inbox
+
+The Inbox lane shows things that may need a reply. Margin checks every 30 minutes, from 07:00 to 17:00 on weekdays. It skips the check when the screen is locked or nobody used the PC for 30 minutes. Tray > **Check inbox now** runs a check at once.
+
+| Source | What | How |
+|---|---|---|
+| GitHub | Open pull requests that ask for your review | `gh search prs --review-requested=@me`, no model |
+| Slack | Direct questions to you with no reply, from the last 2 working days | `claude -p` with read-only Slack tools |
+| ClickUp | Your tasks that are due today or overdue | `claude -p` with read-only ClickUp tools |
+
+An entry goes away when a new check no longer finds it. A dismissed entry does not come back. A Slack question with no reply for 2 hours gives one toast, and a click on the toast opens the message.
+
+Keys on a selected entry: Enter or O opens it, F makes a follow-up, L posts it to Slack for later, D or Delete dismisses it. L also works on follow-ups.
+
+**Later** posts the text and the link to a Slack incoming webhook. To set it up, create a Slack app with an incoming webhook for `#petter-brain`, then put the webhook URL in `later_webhook`.
+
+Each check runs one `claude -p` call, with `MARGIN_IGNORE=1` so that it does not show in the sessions lane. The log shows its duration and cost.
 
 ## AppBar release
 

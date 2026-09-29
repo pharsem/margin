@@ -23,7 +23,8 @@
         "resizable": false,
         "maximizable": false,
         "minimizable": false,
-        "shadow": false
+        "shadow": false,
+        "create": false
       },
       {
         "label": "capture",
@@ -38,7 +39,8 @@
         "maximizable": false,
         "minimizable": false,
         "shadow": true,
-        "focus": false
+        "focus": false,
+        "create": false
       }
     ],
     "security": {
