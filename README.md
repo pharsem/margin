@@ -57,6 +57,22 @@ Type one line and press Enter. An optional time at the end sets a timer: `30m`, 
 | Delete | Delete |
 | Esc | Give focus back to the previous window |
 
+## Claude Code sessions
+
+The panel shows a lane with your Claude Code sessions above the follow-ups. To connect Claude Code, click **Install Claude Code hooks** in the tray menu. Margin backs up `~/.claude/settings.json`, then adds its hooks to the file. Your other hooks stay as they are. Sessions that start after the install use the new hooks.
+
+| State | When |
+|---|---|
+| Running | You send a prompt, or a tool finishes after a permission prompt |
+| Needs input | Claude Code shows a permission prompt or an MCP input form |
+| Done | Claude stops, or you interrupt it with Esc |
+
+Click a session, or select it and press Enter, to go to its window. Margin finds the Windows Terminal tab by the session title, selects the tab and brings the window to the front. For a session in the Claude desktop app, Margin brings the Claude window to the front. A session with no title yet cannot be matched.
+
+A session leaves the lane when it ends, when you mark it reviewed (R), or when its transcript does not change for 12 hours. The time under the state shows how long the session waited for you. It turns amber after 5 minutes and red after 15 minutes. A permission prompt gives a toast at once. A finished reply gives a toast after 30 seconds with no new prompt.
+
+The hooks run `curl` in the background (`"async": true`), so Claude does not wait for them. If Margin is not running, they fail with no message. Set the environment variable `MARGIN_IGNORE=1` for sessions that you do not want in the lane, for example `claude -p` scripts. The hooks post to `127.0.0.1` on the port in `config.json` (`"port"`, default 47811). If you change the port, install the hooks again.
+
 ## AppBar release
 
 The app must release the reserved space when it stops. It does this in these cases:

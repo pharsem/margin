@@ -11,8 +11,14 @@ pub fn create(app: &AppHandle, visible: bool, collapsed: bool) -> tauri::Result<
     let show = CheckMenuItem::with_id(app, "show", "Show panel", true, visible, None::<&str>)?;
     let collapse = CheckMenuItem::with_id(app, "collapse", "Collapse", true, collapsed, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let install = MenuItem::with_id(app, "install-hooks", "Install Claude Code hooks", true, None::<&str>)?;
+    let uninstall = MenuItem::with_id(app, "remove-hooks", "Remove Claude Code hooks", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &collapse, &settings, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(
+        app,
+        &[&show, &collapse, &settings, &separator, &install, &uninstall, &PredefinedMenuItem::separator(app)?, &quit],
+    )?;
 
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("Margin")
@@ -22,6 +28,8 @@ pub fn create(app: &AppHandle, visible: bool, collapsed: bool) -> tauri::Result<
             "show" => crate::toggle_panel(app),
             "collapse" => crate::toggle_collapsed(app),
             "settings" => crate::open_settings(app),
+            "install-hooks" => crate::install_hooks(app, true),
+            "remove-hooks" => crate::install_hooks(app, false),
             "quit" => app.exit(0),
             _ => {}
         })

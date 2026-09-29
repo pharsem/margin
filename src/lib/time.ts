@@ -1,6 +1,6 @@
 const MINUTE = 60_000;
 
-function span(minutes: number): string {
+export function span(minutes: number): string {
   if (minutes < 60) return `${minutes} min`;
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;

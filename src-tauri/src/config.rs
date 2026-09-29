@@ -25,6 +25,8 @@ pub struct Config {
     pub width: u32,
     pub hotkey: String,
     pub focus_hotkey: String,
+    /// Localhost port for the Claude Code hooks.
+    pub port: u16,
     /// Unset means on for installed builds and off for dev builds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autostart: Option<bool>,
@@ -38,6 +40,7 @@ impl Default for Config {
             width: 320,
             hotkey: "Ctrl+Alt+Space".into(),
             focus_hotkey: "Ctrl+Alt+N".into(),
+            port: 47811,
             autostart: None,
         }
     }

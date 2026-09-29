@@ -2,6 +2,10 @@
 mod appbar;
 mod config;
 #[cfg(windows)]
+mod focus;
+mod hooks_install;
+mod server;
+#[cfg(windows)]
 mod shell;
 mod state;
 mod tray;
@@ -9,7 +13,8 @@ mod tray;
 use chrono::Local;
 use config::Config;
 use serde::Serialize;
-use state::{Core, Error, Event, Item, Parsed};
+use state::sessions::Status;
+use state::{Core, Error, Event, Item, Parsed, Session};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +40,8 @@ struct AppState {
     /// The window that had focus before a hotkey took it, so focus can go back.
     previous_foreground: AtomicIsize,
     editing: Mutex<Option<i64>>,
+    server: Mutex<Option<server::Server>>,
+    server_error: Mutex<Option<String>>,
 }
 
 fn app_state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -51,6 +58,7 @@ fn err(e: impl std::fmt::Display) -> Error {
 
 #[derive(Clone, Serialize)]
 struct Snapshot {
+    sessions: Vec<Session>,
     open: Vec<Item>,
     done_today: Vec<Item>,
     collapsed: bool,
@@ -64,8 +72,10 @@ fn snapshot(app: &AppHandle) -> Result<Snapshot, Error> {
     let items = st.core.items(Local::now())?;
     let mut errors: Vec<String> = lock(&st.config_error).iter().cloned().collect();
     errors.extend(lock(&st.hotkey_errors).iter().cloned());
+    errors.extend(lock(&st.server_error).iter().cloned());
     let config = lock(&st.config).clone();
     Ok(Snapshot {
+        sessions: st.core.sessions()?,
         open: items.open,
         done_today: items.done_today,
         collapsed: st.collapsed.load(Ordering::SeqCst),
@@ -139,6 +149,30 @@ fn snooze_item(app: AppHandle, id: i64, minutes: i64) -> Result<(), Error> {
 #[tauri::command]
 fn delete_item(app: AppHandle, id: i64) -> Result<(), Error> {
     app_state(&app).core.delete(id)
+}
+
+#[tauri::command]
+fn review_session(app: AppHandle, id: String) -> Result<(), Error> {
+    app_state(&app).core.review(&id)
+}
+
+#[tauri::command]
+async fn focus_session(app: AppHandle, id: String) -> Result<(), Error> {
+    let session = app_state(&app).core.session(&id)?;
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            focus::focus_session(session.title.as_deref(), session.entrypoint.as_deref())
+        })
+        .await
+        .map_err(err)?
+        .map_err(Error)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = session;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -332,6 +366,7 @@ fn reload_config(app: &AppHandle) {
             eprintln!("[config] reloaded {config:?}");
             *lock(&st.config) = config.clone();
             *lock(&st.config_error) = None;
+            start_server(app, config.port);
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || {
                 #[cfg(windows)]
@@ -363,6 +398,60 @@ fn notify_due(app: &AppHandle, items: &[Item]) {
     }
 }
 
+fn notify_sessions(app: &AppHandle, sessions: &[Session]) {
+    let describe = |s: &Session| match s.status {
+        Status::NeedsInput => format!("{} needs input", s.folder),
+        _ => format!("{} is done", s.folder),
+    };
+    let (title, body) = match sessions {
+        [] => return,
+        [s] => (describe(s), s.message.clone().or_else(|| s.prompt.clone()).unwrap_or_default()),
+        _ => (
+            format!("{} sessions waiting", sessions.len()),
+            sessions.iter().take(5).map(describe).collect::<Vec<_>>().join("
+"),
+        ),
+    };
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("[notify] {e}");
+    }
+}
+
+fn start_server(app: &AppHandle, port: u16) {
+    let st = app_state(app);
+    if lock(&st.server).as_ref().is_some_and(|s| s.port == port) {
+        return;
+    }
+    // Drop the old server first, so it releases the port.
+    *lock(&st.server) = None;
+    let core = st.core.clone();
+    match tauri::async_runtime::block_on(server::start(core, port)) {
+        Ok(server) => {
+            *lock(&st.server) = Some(server);
+            *lock(&st.server_error) = None;
+        }
+        Err(e) => {
+            eprintln!("[server] {e}");
+            *lock(&st.server_error) = Some(e);
+        }
+    }
+}
+
+pub(crate) fn install_hooks(app: &AppHandle, install: bool) {
+    let port = lock(&app_state(app).config).port;
+    let result = if install { hooks_install::install(port) } else { hooks_install::uninstall() };
+    let (title, body) = match result {
+        Ok(backup) => (
+            if install { "Claude Code hooks installed" } else { "Claude Code hooks removed" }.to_string(),
+            format!("New sessions use the change. Backup: {}", backup.display()),
+        ),
+        Err(e) => ("Claude Code hooks not changed".to_string(), e),
+    };
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("[notify] {e}");
+    }
+}
+
 fn start_background(app: &AppHandle) {
     let core = app_state(app).core.clone();
 
@@ -372,6 +461,7 @@ fn start_background(app: &AppHandle) {
         match events.blocking_recv() {
             Ok(Event::Changed) => emit_snapshot(&handle),
             Ok(Event::Due(items)) => notify_due(&handle, &items),
+            Ok(Event::SessionsWaiting(sessions)) => notify_sessions(&handle, &sessions),
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => emit_snapshot(&handle),
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
@@ -388,6 +478,9 @@ fn start_background(app: &AppHandle) {
             let now = Local::now();
             if let Err(e) = core.tick(now) {
                 eprintln!("[tick] {e}");
+            }
+            if let Err(e) = core.check_transcripts(now).and_then(|_| core.tick_sessions(now)) {
+                eprintln!("[sessions] {e}");
             }
             if last_purge.is_none_or(|t| t.elapsed().unwrap_or_default() >= PURGE_EVERY) {
                 if let Err(e) = core.purge(now) {
@@ -440,6 +533,8 @@ pub fn run() {
             reopen_item,
             snooze_item,
             delete_item,
+            review_session,
+            focus_session,
             set_collapsed,
             release_focus,
             quit,
@@ -464,7 +559,10 @@ pub fn run() {
                 collapsed: AtomicBool::new(collapsed),
                 previous_foreground: AtomicIsize::new(0),
                 editing: Mutex::new(None),
+                server: Mutex::new(None),
+                server_error: Mutex::new(None),
             });
+            start_server(&handle, config.port);
 
             let panel = app.get_webview_window(PANEL).expect("panel window");
             #[cfg(windows)]

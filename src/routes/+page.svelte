@@ -23,6 +23,8 @@
     --accent: #7aa2f7;
     --danger: #f7768e;
     --danger-bg: #3b2229;
+    --warn: #e0af68;
+    --warn-bg: #3a3222;
     color-scheme: dark;
   }
   :global(html, body) {

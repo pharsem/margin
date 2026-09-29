@@ -3,12 +3,15 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick } from "svelte";
-  import { api, type Item, type Snapshot } from "./api";
-  import { clock, relative } from "./time";
+  import { api, type Item, type Session, type Snapshot } from "./api";
+  import { clock, relative, span } from "./time";
+
+  type Row = { key: string; session?: Session; item?: Item };
 
   const SNOOZE = [10, 30, 120];
 
   let snap = $state<Snapshot>({
+    sessions: [],
     open: [],
     done_today: [],
     collapsed: false,
@@ -17,25 +20,65 @@
     focus_hotkey: "",
   });
   let focused = $state(false);
+  let notice = $state("");
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function showNotice(text: string) {
+    notice = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = ""), 5000);
+  }
+
+  function openSession(session: Session) {
+    selectedKey = `s:${session.id}`;
+    api.focusSession(session.id).catch((e) => showNotice(String(e)));
+  }
   let now = $state(Date.now());
-  let selectedId = $state<number | null>(null);
+  let selectedKey = $state<string | null>(null);
   let showDone = $state(false);
   let edge = $state<"left" | "right">("right");
   let list: HTMLElement | undefined = $state();
 
   const overdue = $derived(snap.open.filter((i) => isOverdue(i, now)).length);
-  const selectedIndex = $derived(snap.open.findIndex((i) => i.id === selectedId));
+  const waiting = $derived(snap.sessions.filter((s) => s.status !== "running").length);
+  const rows = $derived(rowsOf(snap));
+  const selectedIndex = $derived(rows.findIndex((r) => r.key === selectedKey));
+
+  const STATUS_LABEL = { running: "Running", needs_input: "Needs input", done: "Done" } as const;
+
+  function rowsOf(s: Snapshot): Row[] {
+    return [
+      ...s.sessions.map((session) => ({ key: `s:${session.id}`, session })),
+      ...s.open.map((item) => ({ key: `i:${item.id}`, item })),
+    ];
+  }
+
+  function idleMs(s: Session) {
+    return s.waiting_since === null ? 0 : Math.max(0, now - s.waiting_since);
+  }
+
+  function idleLevel(ms: number) {
+    const minutes = ms / 60_000;
+    return minutes >= 15 ? "alert" : minutes >= 5 ? "warn" : "";
+  }
+
+  function idleText(ms: number) {
+    const minutes = Math.floor(ms / 60_000);
+    return minutes < 1 ? "just now" : span(minutes);
+  }
 
   function isOverdue(item: Item, at: number) {
     return item.due_at !== null && item.due_at <= at;
   }
 
   function apply(s: Snapshot) {
+    const previousIndex = selectedIndex;
     snap = s;
     now = Date.now();
-    if (selectedId !== null && !s.open.some((i) => i.id === selectedId)) {
-      const index = Math.min(Math.max(selectedIndex, 0), s.open.length - 1);
-      selectedId = s.open[index]?.id ?? null;
+    const next = rowsOf(s);
+    if (selectedKey !== null && !next.some((r) => r.key === selectedKey)) {
+      const index = Math.min(Math.max(previousIndex, 0), next.length - 1);
+      selectedKey = next[index]?.key ?? null;
     }
   }
 
@@ -48,16 +91,27 @@
   }
 
   function select(offset: number) {
-    if (snap.open.length === 0) return;
-    const start = selectedIndex < 0 ? (offset > 0 ? -1 : snap.open.length) : selectedIndex;
-    const index = Math.min(Math.max(start + offset, 0), snap.open.length - 1);
-    selectedId = snap.open[index].id;
+    if (rows.length === 0) return;
+    const start = selectedIndex < 0 ? (offset > 0 ? -1 : rows.length) : selectedIndex;
+    const index = Math.min(Math.max(start + offset, 0), rows.length - 1);
+    selectedKey = rows[index].key;
     tick().then(() => list?.querySelector(".selected")?.scrollIntoView({ block: "nearest" }));
   }
 
   function onKey(e: KeyboardEvent) {
     if (snap.collapsed) return;
-    const id = selectedId;
+    const row = rows.find((r) => r.key === selectedKey);
+    if (row?.session && e.key === "Enter") {
+      openSession(row.session);
+      e.preventDefault();
+      return;
+    }
+    if (row?.session && ["d", "r", "Delete"].includes(e.key)) {
+      report(api.review(row.session.id));
+      e.preventDefault();
+      return;
+    }
+    const id = row?.item?.id ?? null;
     switch (e.key) {
       case "ArrowDown":
         select(1);
@@ -104,7 +158,7 @@
     const unlisten = [
       listen<Snapshot>("snapshot", (e) => apply(e.payload)),
       listen("panel-focus", () => {
-        if (selectedId === null) select(1);
+        if (selectedKey === null) select(1);
         list?.focus();
       }),
       getCurrentWindow().onFocusChanged(({ payload }) => (focused = payload)),
@@ -121,6 +175,9 @@
 {#if snap.collapsed}
   <button class="strip" class:focused onclick={() => api.setCollapsed(false)} title="Expand">
     <span class="icon">{edge === "right" ? "" : ""}</span>
+    {#if waiting > 0}
+      <span class="badge warn" title="Sessions waiting">{waiting}</span>
+    {/if}
     {#if overdue > 0}
       <span class="badge danger">{overdue}</span>
     {/if}
@@ -139,12 +196,44 @@
     {#each snap.errors as error}
       <p class="error">{error}</p>
     {/each}
+    {#if notice}
+      <p class="error">{notice}</p>
+    {/if}
 
-    <ul bind:this={list} tabindex="-1">
+    <div class="scroll" bind:this={list} tabindex="-1">
+      {#if snap.sessions.length > 0}
+        <h2>Sessions</h2>
+        <ul>
+          {#each snap.sessions as session (session.id)}
+            {@const idle = idleMs(session)}
+            <li
+              class="session s-{session.status} {session.status === 'running' ? '' : idleLevel(idle)}"
+              class:selected={`s:${session.id}` === selectedKey}
+            >
+              <button class="row" onclick={() => openSession(session)} title="Open the session window ({session.cwd})">
+                <span class="dot"></span>
+                <span class="title">
+                  <strong>{session.folder}</strong>
+                  {#if session.title ?? session.prompt}<span class="prompt">{session.title ?? session.prompt}</span>{/if}
+                </span>
+                <span class="due">
+                  {STATUS_LABEL[session.status]}
+                  {#if session.status !== "running"}<br />{idleText(idle)}{/if}
+                </span>
+              </button>
+              <div class="actions">
+                <button class="icon" title="Reviewed (R)" onclick={() => report(api.review(session.id))}>{"\uE73E"}</button>
+              </div>
+            </li>
+          {/each}
+        </ul>
+        <h2>Follow-ups</h2>
+      {/if}
+      <ul>
       {#each snap.open as item (item.id)}
         {@const late = isOverdue(item, now)}
-        <li class:overdue={late} class:selected={item.id === selectedId}>
-          <button class="row" onclick={() => (selectedId = item.id)} ondblclick={() => report(api.edit(item.id))}>
+        <li class:overdue={late} class:selected={`i:${item.id}` === selectedKey}>
+          <button class="row" onclick={() => (selectedKey = `i:${item.id}`)} ondblclick={() => report(api.edit(item.id))}>
             <span class="title">{item.title}</span>
             {#if item.due_at !== null}
               <span class="due" title={clock(item.due_at)}>{relative(item.due_at, now)}</span>
@@ -164,10 +253,11 @@
       {:else}
         <li class="empty">Nothing waiting. {snap.hotkey} to add.</li>
       {/each}
-    </ul>
+      </ul>
+    </div>
 
     {#if focused}
-      <p class="keys">↑↓ select · Enter done · 1 2 3 snooze · E edit · Del delete · Esc leave</p>
+      <p class="keys">↑↓ select · Enter done or open · 1 2 3 snooze · E edit · Del delete · R reviewed · Esc leave</p>
     {:else if snap.focus_hotkey}
       <p class="keys">{snap.focus_hotkey} to use the keyboard</p>
     {/if}
@@ -266,8 +356,73 @@
     overflow-y: auto;
     outline: none;
   }
-  main > ul {
+  .scroll {
     flex: 1;
+    overflow-y: auto;
+    outline: none;
+  }
+  h2 {
+    margin: 8px 14px 2px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .session .title {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .prompt {
+    color: var(--muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session .due {
+    text-align: right;
+  }
+  li.session {
+    display: flex;
+    align-items: center;
+  }
+  li.session .row {
+    flex: 1;
+    min-width: 0;
+  }
+  li.session .actions {
+    padding: 0 6px 0 0;
+  }
+  .dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    align-self: center;
+    background: var(--accent);
+  }
+  .session.s-needs_input .dot,
+  .session.s-done .dot {
+    background: var(--warn);
+  }
+  .session.s-needs_input .due {
+    color: var(--warn);
+    font-weight: 600;
+  }
+  .session.warn {
+    background: var(--warn-bg);
+  }
+  .session.alert {
+    background: var(--danger-bg);
+  }
+  .session.alert .dot {
+    background: var(--danger);
+  }
+  .session.alert .due {
+    color: var(--danger);
+    font-weight: 600;
   }
   li {
     border-radius: 6px;
@@ -365,6 +520,11 @@
     color: var(--muted);
     font-size: 12px;
     box-sizing: border-box;
+  }
+  .badge.warn {
+    background: var(--warn);
+    color: #1e1f22;
+    font-weight: 700;
   }
   .badge.danger {
     background: var(--danger);

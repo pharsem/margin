@@ -1,6 +1,7 @@
 //! Business logic and storage. Knows nothing about Tauri, so the HTTP API can share it.
 
 pub mod parse;
+pub mod sessions;
 
 use chrono::{DateTime, Local, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -10,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 pub use parse::Parsed;
+pub use sessions::{HookEvent, Session};
 
 const DONE_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -34,6 +36,8 @@ pub enum Event {
     Changed,
     /// Items that became due since the last tick. Sent once per item.
     Due(Vec<Item>),
+    /// Sessions that started to wait for the user. Sent once per wait.
+    SessionsWaiting(Vec<Session>),
 }
 
 #[derive(Debug)]
@@ -77,6 +81,21 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX items_done_at ON items(done_at);
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    "CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        cwd TEXT NOT NULL,
+        transcript_path TEXT,
+        transcript_mtime INTEGER,
+        status TEXT NOT NULL,
+        prompt TEXT,
+        message TEXT,
+        started_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        waiting_since INTEGER,
+        notified_at INTEGER
+    );",
+    "ALTER TABLE sessions ADD COLUMN title TEXT;
+    ALTER TABLE sessions ADD COLUMN entrypoint TEXT;",
 ];
 
 impl Core {
