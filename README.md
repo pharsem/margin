@@ -1,6 +1,6 @@
 # Margin
 
-A Windows 11 panel that docks to a screen edge as an AppBar. It holds short-lived follow-ups with timers. `SPEC.md` gives the plan.
+A Windows 11 panel that docks to a screen edge as an AppBar. It holds short-lived follow-ups with timers. The original plan and its reasons are in [docs/spec.md](docs/spec.md) and [docs/context-capture.md](docs/context-capture.md).
 
 Status: early work. Windows 11 only.
 

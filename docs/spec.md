@@ -1,5 +1,7 @@
 # Now panel — spec
 
+> Status: the original build plan. Steps 0 to 3 and step 1b are built. Step 4 is not started. The README describes how the app works now.
+
 A Windows desktop panel that docks to a screen edge and holds the fast loop: things to follow up on within minutes or hours, and the state of parallel Claude Code sessions. It is not a task manager. Anything that isn't relevant today goes elsewhere (ClickUp, #petter-brain).
 
 ## Principles
@@ -63,7 +65,7 @@ Done when: I can capture "check deploy 30m" from any app without touching the mo
 
 ### Step 1b — Context suggestions in capture
 
-See CONTEXT-CAPTURE.md. The capture popup suggests notes from the window I was in (e.g. the PR open in my browser), selectable with ↓.
+See [context-capture.md](context-capture.md). The capture popup suggests notes from the window I was in (e.g. the PR open in my browser), selectable with ↓.
 
 ### Step 2 — Claude Code sessions lane (outline, spec in detail later)
 

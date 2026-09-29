@@ -1,6 +1,8 @@
 # Context suggestions in quick capture — spec
 
-Extends step 1 of SPEC.md. Build after step 1 works.
+> Status: built as step 1b. The README describes how the app works now.
+
+Extends step 1 of [spec.md](spec.md). Build after step 1 works.
 
 ## Goal
 
