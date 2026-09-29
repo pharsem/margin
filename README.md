@@ -18,6 +18,18 @@ pnpm install
 pnpm tauri dev
 ```
 
+## Install
+
+```
+pnpm tauri build
+```
+
+This makes `src-tauri\target\release\bundle\nsis\Margin_<version>_x64-setup.exe`, a per-user installer that needs no admin rights. It installs to `%LOCALAPPDATA%\Margin` and adds a Start menu shortcut. The installed app starts with Windows, and its toasts show "Margin" as the sender.
+
+The installed app and `pnpm tauri dev` use the same identifier, config and database. Only one can run at a time. Quit the installed app from the tray before you start `pnpm tauri dev`, or the dev build gives focus to the installed app and exits.
+
+To change the icon, edit `src-tauri/icons/icon.svg` and run `pnpm tauri icon src-tauri/icons/icon.svg`. Then delete the `android` and `ios` folders that it makes.
+
 ## Config
 
 The app reads `%APPDATA%\com.petterharsem.margin\config.json` at startup and creates it with defaults if it is missing. Tray > Settings opens the file. The app applies changes when you save the file.
