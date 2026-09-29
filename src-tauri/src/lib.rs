@@ -484,16 +484,55 @@ fn notify_sessions(app: &AppHandle, sessions: &[Session]) {
     };
     let (title, body) = match sessions {
         [] => return,
-        [s] => (describe(s), s.message.clone().or_else(|| s.prompt.clone()).unwrap_or_default()),
+        [s] => (
+            describe(s),
+            s.message.clone().or_else(|| s.title.clone()).or_else(|| s.prompt.clone()).unwrap_or_default(),
+        ),
         _ => (
             format!("{} sessions waiting", sessions.len()),
-            sessions.iter().take(5).map(describe).collect::<Vec<_>>().join("
-"),
+            sessions.iter().take(5).map(describe).collect::<Vec<_>>().join("\n"),
         ),
     };
-    if let Err(e) = app.notification().builder().title(title).body(body).show() {
-        eprintln!("[notify] {e}");
+    // A click on the toast opens the first session, the same as a click in the lane.
+    let first = sessions[0].id.clone();
+    #[cfg(windows)]
+    {
+        use tauri_winrt_notification::Toast;
+        // Same rule as tauri-plugin-notification: a dev build has no registered app ID.
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let dev = exe_dir.is_some_and(|d| d.ends_with("target\\debug") || d.ends_with("target\\release"));
+        let app_id = if dev { Toast::POWERSHELL_APP_ID.to_string() } else { app.config().identifier.clone() };
+        let handle = app.clone();
+        let result = Toast::new(&app_id)
+            .title(&title)
+            .text1(&body)
+            .on_activated(move |_| {
+                open_session(&handle, &first);
+                Ok(())
+            })
+            .show();
+        if let Err(e) = result {
+            eprintln!("[notify] {e}");
+        }
     }
+    #[cfg(not(windows))]
+    {
+        let _ = first;
+        if let Err(e) = app.notification().builder().title(title).body(body).show() {
+            eprintln!("[notify] {e}");
+        }
+    }
+}
+
+/// Brings the window of a session to the front, and shows the error in the panel if it fails.
+fn open_session(app: &AppHandle, id: &str) {
+    let handle = app.clone();
+    let id = id.to_string();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = focus_session(handle.clone(), id).await {
+            let _ = handle.emit_to(PANEL, "notice", e.0);
+        }
+    });
 }
 
 fn start_server(app: &AppHandle, port: u16) {

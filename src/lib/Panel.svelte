@@ -167,6 +167,7 @@
         list?.focus();
       }),
       getCurrentWindow().onFocusChanged(({ payload }) => (focused = payload)),
+      listen<string>("notice", (e) => showNotice(e.payload)),
     ];
     return () => {
       timers.forEach(clearInterval);

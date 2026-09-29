@@ -40,6 +40,7 @@ panic = "abort"
 strip = true
 
 [target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.8"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
