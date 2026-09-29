@@ -55,6 +55,8 @@ struct Snapshot {
     done_today: Vec<Item>,
     collapsed: bool,
     errors: Vec<String>,
+    hotkey: String,
+    focus_hotkey: String,
 }
 
 fn snapshot(app: &AppHandle) -> Result<Snapshot, Error> {
@@ -62,11 +64,14 @@ fn snapshot(app: &AppHandle) -> Result<Snapshot, Error> {
     let items = st.core.items(Local::now())?;
     let mut errors: Vec<String> = lock(&st.config_error).iter().cloned().collect();
     errors.extend(lock(&st.hotkey_errors).iter().cloned());
+    let config = lock(&st.config).clone();
     Ok(Snapshot {
         open: items.open,
         done_today: items.done_today,
         collapsed: st.collapsed.load(Ordering::SeqCst),
         errors,
+        hotkey: config.hotkey,
+        focus_hotkey: config.focus_hotkey,
     })
 }
 

@@ -14,6 +14,8 @@ export type Snapshot = {
   done_today: Item[];
   collapsed: boolean;
   errors: string[];
+  hotkey: string;
+  focus_hotkey: string;
 };
 
 export type Parsed = { title: string; due_at: number | null };

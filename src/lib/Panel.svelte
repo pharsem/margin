@@ -1,13 +1,22 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick } from "svelte";
   import { api, type Item, type Snapshot } from "./api";
   import { clock, relative } from "./time";
 
   const SNOOZE = [10, 30, 120];
 
-  let snap = $state<Snapshot>({ open: [], done_today: [], collapsed: false, errors: [] });
+  let snap = $state<Snapshot>({
+    open: [],
+    done_today: [],
+    collapsed: false,
+    errors: [],
+    hotkey: "",
+    focus_hotkey: "",
+  });
+  let focused = $state(false);
   let now = $state(Date.now());
   let selectedId = $state<number | null>(null);
   let showDone = $state(false);
@@ -98,6 +107,7 @@
         if (selectedId === null) select(1);
         list?.focus();
       }),
+      getCurrentWindow().onFocusChanged(({ payload }) => (focused = payload)),
     ];
     return () => {
       timers.forEach(clearInterval);
@@ -109,7 +119,7 @@
 <svelte:window onkeydown={onKey} />
 
 {#if snap.collapsed}
-  <button class="strip" onclick={() => api.setCollapsed(false)} title="Expand">
+  <button class="strip" class:focused onclick={() => api.setCollapsed(false)} title="Expand">
     <span class="icon">{edge === "right" ? "" : ""}</span>
     {#if overdue > 0}
       <span class="badge danger">{overdue}</span>
@@ -117,10 +127,10 @@
     <span class="badge">{snap.open.length}</span>
   </button>
 {:else}
-  <main class:left={edge === "left"}>
+  <main class:left={edge === "left"} class:focused>
     <header>
       <h1>Now <span class="count">{snap.open.length}</span></h1>
-      <button class="icon" title="Add (Ctrl+Alt+Space)" onclick={() => report(api.openCapture())}>{""}</button>
+      <button class="icon" title="Add ({snap.hotkey})" onclick={() => report(api.openCapture())}>{""}</button>
       <button class="icon" title="Collapse" onclick={() => api.setCollapsed(true)}>
         {edge === "right" ? "" : ""}
       </button>
@@ -152,9 +162,15 @@
           </div>
         </li>
       {:else}
-        <li class="empty">Nothing waiting. Ctrl+Alt+Space to add.</li>
+        <li class="empty">Nothing waiting. {snap.hotkey} to add.</li>
       {/each}
     </ul>
+
+    {#if focused}
+      <p class="keys">↑↓ select · Enter done · 1 2 3 snooze · E edit · Del delete · Esc leave</p>
+    {:else if snap.focus_hotkey}
+      <p class="keys">{snap.focus_hotkey} to use the keyboard</p>
+    {/if}
 
     {#if snap.done_today.length > 0}
       <footer>
@@ -189,6 +205,24 @@
   main.left {
     border-left: 0;
     border-right: 1px solid var(--border);
+  }
+  main.focused,
+  .strip.focused {
+    border-color: var(--accent);
+    box-shadow: inset 0 3px 0 var(--accent);
+  }
+  main.focused h1 {
+    color: var(--accent);
+  }
+  .keys {
+    margin: 0;
+    padding: 6px 14px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+  }
+  main.focused .keys {
+    color: var(--accent);
   }
   header {
     display: flex;
