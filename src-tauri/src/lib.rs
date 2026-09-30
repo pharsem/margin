@@ -35,6 +35,7 @@ const COLLAPSED_KEY: &str = "collapsed";
 const INBOX_LAST_RUN_KEY: &str = "inbox_last_run";
 /// Skip the inbox check when nobody used the PC for this long.
 const AWAY_MS: u32 = 30 * 60 * 1000;
+const RESIZE_DELAY: Duration = Duration::from_millis(60);
 const PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 struct AppState {
@@ -286,6 +287,11 @@ fn set_collapsed(app: AppHandle, collapsed: bool) {
 }
 
 #[tauri::command]
+fn show_menu(app: AppHandle, window: tauri::WebviewWindow, x: f64, y: f64) -> Result<(), Error> {
+    tray::popup(&app, &window, x, y).map_err(err)
+}
+
+#[tauri::command]
 fn release_focus(app: AppHandle) {
     #[cfg(windows)]
     shell::set_foreground_window(app_state(&app).previous_foreground.load(Ordering::SeqCst));
@@ -461,10 +467,19 @@ fn apply_collapsed(app: &AppHandle, collapsed: bool) {
     if let Err(e) = st.core.set_meta(COLLAPSED_KEY, if collapsed { "true" } else { "false" }) {
         eprintln!("[collapse] {e}");
     }
-    #[cfg(windows)]
-    appbar::set_collapsed(collapsed);
     tray::sync(app, st.visible.load(Ordering::SeqCst), collapsed);
-    emit_snapshot(app);
+    // The panel hides its content first, so the resize does not show a stretched old frame.
+    let _ = app.emit_to(PANEL, "panel-resize", ());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(RESIZE_DELAY);
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            #[cfg(windows)]
+            appbar::set_collapsed(app_state(&handle).collapsed.load(Ordering::SeqCst));
+            emit_snapshot(&handle);
+        });
+    });
 }
 
 pub(crate) fn toggle_panel(app: &AppHandle) {
@@ -843,6 +858,7 @@ pub fn run() {
             review_session,
             focus_session,
             set_collapsed,
+            show_menu,
             release_focus,
             open_url,
             quit,

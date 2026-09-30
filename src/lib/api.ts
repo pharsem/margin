@@ -76,6 +76,7 @@ export const api = {
   snooze: (id: number, minutes: number) => invoke<void>("snooze_item", { id, minutes }),
   remove: (id: number) => invoke<void>("delete_item", { id }),
   setCollapsed: (collapsed: boolean) => invoke<void>("set_collapsed", { collapsed }),
+  showMenu: (x: number, y: number) => invoke<void>("show_menu", { x, y }),
   releaseFocus: () => invoke<void>("release_focus"),
   review: (id: string) => invoke<void>("review_session", { id }),
   focusSession: (id: string) => invoke<void>("focus_session", { id }),

@@ -24,6 +24,7 @@
         "maximizable": false,
         "minimizable": false,
         "shadow": false,
+        "backgroundColor": "#1e1f22",
         "create": false
       },
       {

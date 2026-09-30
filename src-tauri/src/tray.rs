@@ -1,8 +1,9 @@
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, LogicalPosition, Manager, WebviewWindow, Wry};
 
 pub struct Tray {
+    menu: Menu<Wry>,
     show: CheckMenuItem<Wry>,
     collapse: CheckMenuItem<Wry>,
 }
@@ -44,8 +45,16 @@ pub fn create(app: &AppHandle, visible: bool, collapsed: bool) -> tauri::Result<
         builder = builder.icon(icon.clone());
     }
     builder.build(app)?;
-    app.manage(Tray { show, collapse });
+    app.manage(Tray { menu, show, collapse });
     Ok(())
+}
+
+/// Opens the tray menu in the panel. Its clicks reach the tray's `on_menu_event` handler.
+pub fn popup(app: &AppHandle, window: &WebviewWindow, x: f64, y: f64) -> tauri::Result<()> {
+    match app.try_state::<Tray>() {
+        Some(tray) => window.popup_menu_at(&tray.menu, LogicalPosition::new(x, y)),
+        None => Ok(()),
+    }
 }
 
 /// Check items toggle themselves on click, so set them from the real state after each change.

@@ -24,6 +24,8 @@
     focus_hotkey: "",
   });
   let focused = $state(false);
+  let resizing = $state(false);
+  let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -78,6 +80,7 @@
 
   function apply(s: Snapshot) {
     const previousIndex = selectedIndex;
+    if (resizing) requestAnimationFrame(() => requestAnimationFrame(endResize));
     snap = s;
     now = Date.now();
     const next = rowsOf(s);
@@ -89,6 +92,18 @@
 
   async function refresh() {
     apply(await api.snapshot());
+  }
+
+  function startResize() {
+    resizing = true;
+    clearTimeout(resizeTimer);
+    // Shows the content again if the snapshot after the resize never arrives.
+    resizeTimer = setTimeout(endResize, 1000);
+  }
+
+  function endResize() {
+    clearTimeout(resizeTimer);
+    resizing = false;
   }
 
   function report(p: Promise<unknown>) {
@@ -172,6 +187,11 @@
     e.preventDefault();
   }
 
+  function openMenu(e: MouseEvent) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    api.showMenu(rect.left, rect.bottom).catch((err) => showNotice(String(err)));
+  }
+
   function snoozeLabel(minutes: number) {
     return minutes < 60 ? `${minutes}m` : `${minutes / 60}h`;
   }
@@ -192,6 +212,7 @@
       }),
       getCurrentWindow().onFocusChanged(({ payload }) => (focused = payload)),
       listen<string>("notice", (e) => showNotice(e.payload)),
+      listen("panel-resize", startResize),
     ];
     return () => {
       timers.forEach(clearInterval);
@@ -203,7 +224,7 @@
 <svelte:window onkeydown={onKey} />
 
 {#if snap.collapsed}
-  <button class="strip" class:focused onclick={() => api.setCollapsed(false)} title="Expand">
+  <button class="strip" class:focused class:resizing onclick={() => api.setCollapsed(false)} title="Expand">
     <span class="icon">{edge === "right" ? "" : ""}</span>
     {#if waiting > 0}
       <span class="badge warn" title="Sessions waiting">{waiting}</span>
@@ -214,10 +235,11 @@
     <span class="badge">{snap.open.length}</span>
   </button>
 {:else}
-  <main class:left={edge === "left"} class:focused>
+  <main class:left={edge === "left"} class:focused class:resizing>
     <header>
       <h1>Now <span class="count">{snap.open.length}</span></h1>
       <button class="icon" title="Add ({snap.hotkey})" onclick={() => report(api.openCapture())}>{""}</button>
+      <button class="icon" title="Menu" onclick={openMenu}>{""}</button>
       <button class="icon" title="Collapse" onclick={() => api.setCollapsed(true)}>
         {edge === "right" ? "" : ""}
       </button>
@@ -379,6 +401,14 @@
     height: 100vh;
     box-sizing: border-box;
     border-left: 1px solid var(--border);
+  }
+  main,
+  .strip {
+    transition: opacity 120ms ease-out;
+  }
+  .resizing {
+    opacity: 0;
+    transition: none;
   }
   main.left {
     border-left: 0;
